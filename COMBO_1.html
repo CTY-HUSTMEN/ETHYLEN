@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+
+<title>COMBO 2</title>
+<link rel="icon" href="logo.png">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, onValue, runTransaction, push } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+// =====================
+// FIREBASE CONFIG
+// =====================
+const firebaseConfig = {
+  apiKey: "AIzaSyBtdk8zuVGkueYcRurRIAWIm_AlTrrGg9Y",
+  authDomain: "su-kien-fe294.firebaseapp.com",
+  databaseURL: "https://su-kien-fe294-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "su-kien-fe294",
+  storageBucket: "su-kien-fe294.firebasestorage.app",
+  messagingSenderId: "863152941656",
+  appId: "1:863152941656:web:f4adea7c33d941a9d8b82d"
+};
+
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// =====================
+// BIẾN
+// =====================
+window.type = "";
+const ITEM_NAME = "COMBO_2";
+let isProcessing = false;
+let unsubscribe = null;
+
+// =====================
+// STEP UI
+// =====================
+window.goStep = function(step, selectedType=""){
+    if(selectedType) type = selectedType;
+
+    // 🔥 ẨN TẤT CẢ STEP
+    document.getElementById("step1").style.display="none";
+    document.getElementById("step2").style.display="none";
+    document.getElementById("step3").style.display="none";
+
+    // 🔥 HIỆN STEP CẦN
+    document.getElementById("step"+step).style.display="block";
+
+    if(step===2){
+        document.getElementById("stepTitle").innerText =
+            type==="gift" ? "Nhận quà" : "Bán sản phẩm";
+
+        document.querySelector("#step2 button").disabled = true;
+    }
+
+    if(step===3){
+        document.getElementById("addQuantity").value = 1;
+    }
+}
+
+window.resetForm = function(){
+
+    // step2
+    document.getElementById("quantity").value=1;
+    document.getElementById("counter").value="";
+
+    // 🔥 step3
+    document.getElementById("addCounter").value="";
+    document.getElementById("addCombo").value="";
+    document.getElementById("addQuantity").value=1;
+
+    // 🔥 clear realtime listener
+    if(unsubscribe){
+        unsubscribe();
+        unsubscribe = null;
+    }
+
+    type="";
+    goStep(1);
+}
+window.addStock = function(){
+
+    const counter = document.getElementById("addCounter").value;
+    const combo = "COMBO_2";
+    const quantity = Number(document.getElementById("addQuantity").value);
+    const huongType = document.getElementById("addHuongType").value;
+
+    if(!counter || !huongType){
+        alert("Chọn đầy đủ thông tin");
+        return;
+    }
+
+    const comboRef = ref(db, "kho/" + counter + "/" + combo);
+    const muiRef   = ref(db, "kho/" + counter + "/HUT_MUI_TU_LANH");
+    const huongRef = ref(db, "kho/" + counter + "/TUI_TOA_HUONG/" + huongType);
+
+    // =========================
+    // 1. CHECK NGUYÊN LIỆU
+    // =========================
+    Promise.all([
+        runTransaction(muiRef, data => data),
+        runTransaction(huongRef, data => data)
+    ]).then(([muiSnap, huongSnap]) => {
+
+        const mui = muiSnap.snapshot.val()?.stock || 0;
+        const huong = huongSnap.snapshot.val()?.stock || 0;
+
+        if(mui < quantity || huong < quantity*2){
+            alert("Không đủ hàng để thêm vào combo");
+            return;
+        }
+
+        // =========================
+        // 2. TRỪ + CỘNG (ROOT TRANSACTION)
+        // =========================
+        runTransaction(ref(db), (root) => {
+
+            if(!root) return root;
+
+            const path = root.kho[counter];
+
+            if(!path) return;
+
+            const muiStock = path["HUT_MUI_TU_LANH"]?.stock || 0;
+            const huongStock = path["TUI_TOA_HUONG"]?.[huongType]?.stock || 0;
+
+            if(muiStock < quantity || huongStock < quantity*2){
+                return; // fail
+            }
+
+            // 🔻 trừ nguyên liệu
+            path["HUT_MUI_TU_LANH"].stock -= quantity;
+            path["TUI_TOA_HUONG"][huongType].stock -= quantity*2;
+
+            // 🔺 cộng combo
+            if(!path[combo]){
+                path[combo] = { stock: 0 };
+            }
+
+            path[combo].stock = (path[combo].stock || 0) + quantity;
+
+            return root;
+
+        }).then(res => {
+
+            if(!res.committed){
+                alert("Lỗi cập nhật");
+                return;
+            }
+
+            // =========================
+            // LOG
+            // =========================
+            const logRef = ref(db, "logs/add");
+
+            push(logRef, {
+                time: Date.now(),
+                item: combo,
+                quantity: quantity,
+                counter: counter,
+
+                materials: {
+                    HUT_MUI_TU_LANH: quantity,
+                    ["TUI_TOA_HUONG_" + huongType]: quantity * 2
+                }
+            });
+
+            alert("Thêm hàng thành công");
+            goStep(1);
+        });
+
+    });
+}
+
+// =====================
+// REALTIME STOCK (FIX)
+// =====================
+document.getElementById("counter").addEventListener("change", function(){
+
+    const counter = this.value;
+    const btn = document.querySelector("#step2 button");
+
+    if(!counter){
+        document.getElementById("stockDisplay").innerText = "Tồn kho: ...";
+        btn.disabled = true;
+        return;
+    }
+
+    // 🔥 HỦY listener cũ
+    if(unsubscribe) unsubscribe();
+
+    const stockRef = ref(db, "kho/" + counter + "/" + ITEM_NAME + "/stock");
+
+    unsubscribe = onValue(stockRef, (snapshot) => {
+
+        let stock = snapshot.val();
+
+        if(stock === null){
+            document.getElementById("stockDisplay").innerText = "Chưa có dữ liệu";
+            btn.disabled = true;
+            return;
+        }
+
+        document.getElementById("stockDisplay").innerText =
+            "Tồn kho: " + stock;
+
+        if(stock <= 100){
+            document.getElementById("stockWarning").innerText =
+                "Sản phẩm chỉ còn lại " + stock;
+        } else {
+            document.getElementById("stockWarning").innerText = "";
+        }
+
+        if(!isProcessing){
+            btn.disabled = stock <= 0;
+        }
+    });
+});
+
+// =====================
+// SUBMIT
+// =====================
+window.submitForm = function(){
+
+    let btn = document.querySelector("#step2 button");
+
+    if(btn.disabled || isProcessing) return;
+
+    isProcessing = true;
+    btn.disabled = true;
+    btn.innerText = "Đang xử lý...";
+
+    let quantity = Number(document.getElementById("quantity").value);
+    let counter = document.getElementById("counter").value;
+
+    if(!counter){
+        alert("Vui lòng chọn quầy");
+        btn.disabled = false;
+        btn.innerText = "Xác nhận";
+        isProcessing = false;
+        return;
+    }
+
+    const itemRef = ref(db, "kho/" + counter + "/" + ITEM_NAME);
+
+    runTransaction(itemRef, (data) => {
+
+        if (data === null) {
+            return {
+                stock: 0,
+                daBan: 0,
+                daTang: 0
+            };
+        }
+
+        if (data.stock < quantity) {
+            return;
+        }
+
+        data.stock -= quantity;
+
+        if(type === "buy") data.daBan = (data.daBan || 0) + quantity;
+        if(type === "gift") data.daTang = (data.daTang || 0) + quantity;
+
+        return data;
+
+    }).then(result => {
+
+        if (!result.committed) {
+            alert("Không đủ hàng");
+            return;
+        }
+
+        const logRef = ref(db, "logs/" + type);
+
+        push(logRef, {
+            time: Date.now(),
+            item: ITEM_NAME,
+            quantity: quantity,
+            counter: counter
+        });
+
+        setTimeout(() => {
+            goStep(1);
+            resetForm();
+        }, 300);
+
+    }).catch(() => {
+        alert("Lỗi hệ thống");
+    }).finally(() => {
+        btn.disabled = false;
+        btn.innerText = "Xác nhận";
+        isProcessing = false;
+    });
+}
+</script>
+
+<style>
+*{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;min-height:100dvh;overflow-x:hidden;font-family:'Segoe UI',Arial,sans-serif;background:linear-gradient(135deg,#ffcc99,#ffffff);}
+body{display:flex;justify-content:center;align-items:center;}
+.wrapper{width:100%;display:flex;justify-content:center;align-items:center;padding:20px;}
+.container{background:white;padding:30px;border-radius:20px;text-align:center;width:95%;max-width:400px;box-shadow:0 10px 40px rgba(0,0,0,0.1);}
+.logo{width:180px;margin-bottom:10px;}
+.title{font-size:26px;font-weight:bold;color:#ff9800;margin-bottom:10px;}
+input,select{width:100%;padding:12px;margin-bottom:15px;border-radius:10px;border:1px solid #ddd;font-size:16px;}
+button{width:100%;padding:15px;background:#ff9800;color:white;border:none;border-radius:12px;font-size:18px;font-weight:bold;}
+.stock{font-weight:bold;margin-bottom:10px;}
+.warning{color:red;font-weight:bold;margin-bottom:10px;}
+</style>
+
+</head>
+
+<body>
+
+<div class="wrapper">
+<div class="container">
+
+<div id="step1">
+    <img src="logo.png" class="logo">
+    <div class="title">HUST MEN</div>
+    <p style="font-weight:bold;margin-bottom:10px;">COMBO 2</p>
+
+    <button onclick="goStep(2,'gift')">QUÀ TẶNG</button>
+    <br><br>
+    <button onclick="goStep(2,'buy')">BÁN</button>
+    <br><br>
+    <button onclick="goStep(3)">THÊM HÀNG</button>
+</div>
+
+<div id="step2" style="display:none;">
+    <p id="stepTitle"></p>
+
+    <p style="font-weight:bold;margin-bottom:10px;">COMBO 2</p>
+
+    <div class="stock" id="stockDisplay">Tồn kho: ...</div>
+    <div class="warning" id="stockWarning"></div>
+
+    <select id="counter">
+        <option value="">-- Chọn quầy --</option>
+        <option value="LA">LA</option>
+        <option value="QUAN_7">QUẬN 7</option>
+    </select>
+
+    <input type="number" id="quantity" min="1" value="1">
+
+    <button onclick="submitForm()">Xác nhận</button>
+</div>
+
+<div id="step3" style="display:none;">
+
+    <p style="margin-bottom:10px;font-weight:bold;">COMBO 2</p>
+
+    <p style="font-weight:bold;margin-bottom:10px;">THÊM HÀNG VÀO</p>
+
+    <select id="addCounter">
+        <option value="">-- Chọn quầy --</option>
+        <option value="LA">LA</option>
+        <option value="QUAN_7">QUẬN 7</option>
+    </select>
+        <select id="addHuongType">
+        <option value="">-- Chọn loại hương --</option>
+        <option value="Nhai">Nhài</option>
+        <option value="Buoi">Bưởi</option>
+        <option value="Oai_huong">Oải hương</option>
+        <option value="Hoa_hong">Hoa Hồng</option>
+        <option value="Que">Quế</option>
+        <option value="Ca_phe">Cà phê</option>
+    </select>
+
+    <input type="number" id="addQuantity" min="1" value="1">
+
+    <button onclick="addStock()">Xác nhận thêm</button>
+</div>
+
+</div>
+</div>
+
+</body>
+</html>
